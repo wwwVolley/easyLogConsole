@@ -91,6 +91,14 @@ object EasyLog {
     /** 运行时外观（透明度、配色），面板里可调，见 [ConsoleAppearance]。 */
     private val appearanceState = ObservableValue(ConsoleAppearance())
 
+    /**
+     * 当前的过滤条件，面板里改了就写到这儿并持久化，见 [ConsoleFilter]。
+     *
+     * 放在门面上而不是面板的 `remember` 里：面板每次开合都会离开组合、`remember` 全丢，
+     * 状态留在这里才能「关掉再打开还是刚才那套条件」。
+     */
+    private val filterState = ObservableValue(ConsoleFilter())
+
     val isEnabled: Boolean
         get() = enabled.value
 
@@ -119,6 +127,10 @@ object EasyLog {
     /** 当前生效的外观。 */
     val appearance: ConsoleAppearance
         get() = appearanceState.value
+
+    /** 当前生效的过滤条件（全部链路 / DEBUG 以上 / 无关键字 为默认值）。 */
+    val filter: ConsoleFilter
+        get() = filterState.value
 
     /** 当前配色对应的预设；宿主自己传了自定义 [ConsoleColors] 且用户没换过时为 `null`。 */
     val currentPalette: ConsolePalette?
@@ -184,6 +196,9 @@ object EasyLog {
             scrimAlpha = prefs?.scrimAlpha ?: normalized.scrimAlpha,
             colors = savedPalette?.colors ?: normalized.colors,
         ).normalized()
+
+        // 过滤条件也沿用上次的：面板下次打开还是同样的链路/级别/关键字
+        filterState.value = (prefs?.filter ?: ConsoleFilter()).normalized()
 
         normalized.file?.let { startFileLogging(it) }
         if (normalized.autoCaptureLogcat) startLogcatCapture()
@@ -281,6 +296,33 @@ object EasyLog {
 
     fun addAppearanceListener(listener: (ConsoleAppearance) -> Unit): AutoCloseable =
         appearanceState.addListener(listener)
+
+    // ── 过滤 ──────────────────────────────────────────────────────
+
+    /**
+     * 改过滤条件（面板里的链路 / 级别 chips 和搜索框走这里），改动会持久化。
+     *
+     * 宿主一般不用调，除非想让日志台**默认就筛某条链路**：
+     * ```kotlin
+     * EasyLog.setFilter(ConsoleFilter(trace = "PROVISION"))
+     * ```
+     * 注意这一行要在面板打开前执行（`Application.onCreate` 即可）。
+     */
+    fun setFilter(filter: ConsoleFilter) {
+        val next = filter.normalized()
+        if (next == filterState.value) return
+        filterState.value = next
+        prefs?.filter = next
+    }
+
+    /** 过滤条件恢复默认（全部链路 + DEBUG 以上 + 无关键字），并清掉记住的值。 */
+    fun resetFilter() {
+        filterState.value = ConsoleFilter()
+        prefs?.filter = null
+    }
+
+    fun addFilterListener(listener: (ConsoleFilter) -> Unit): AutoCloseable =
+        filterState.addListener(listener)
 
     // ── 落盘 ──────────────────────────────────────────────────────
 

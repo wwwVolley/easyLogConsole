@@ -32,12 +32,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.wwwvolley.easylog.ConsoleAppearance
 import io.github.wwwvolley.easylog.ConsoleColors
+import io.github.wwwvolley.easylog.ConsoleFilter
 import io.github.wwwvolley.easylog.EasyLog
 import io.github.wwwvolley.easylog.EasyLogConfig
 import io.github.wwwvolley.easylog.LogEntry
@@ -58,15 +61,18 @@ import io.github.wwwvolley.easylog.LogLevel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
-/** 过滤条件。三个维度合在一起作为轮询协程的 key，条件一变就重建一次列表。 */
-private data class Filters(
-    val trace: String? = null,
-    val minLevel: LogLevel = LogLevel.DEBUG,
-    val query: String = "",
-)
-
+/** 过滤条件在 [ConsoleFilter] 上（核心层，可持久化），这里只放轮询与裁剪相关的常量。 */
 private const val POLL_INTERVAL_MS = 120L
 private const val MAX_SHARE_CHARS = 120_000
+
+/**
+ * 过滤条件落盘的延迟。
+ *
+ * 搜索框是「每敲一个字就改一次条件」，直接写 `SharedPreferences` 会变成
+ * 输入一个词提交十几次磁盘写；去抖到手指停下 400ms 再写一次就够，
+ * 即使进程在 400ms 内被杀，丢的也只是最后几个字符。
+ */
+private const val FILTER_SAVE_DELAY_MS = 400L
 
 /**
  * 半透明日志台：底部抽屉，上方的界面仍然可见。
@@ -83,6 +89,13 @@ private const val MAX_SHARE_CHARS = 120_000
  * ## 为什么 `reverseLayout = true`
  * index 0 贴着底部，新日志天然出现在手指最近的位置，不用写「滚动到底部」的动画，
  * 日志密集时也不会抖。
+ *
+ * ## 用户的操作会被记住
+ * 面板开合会销毁整个 Composable，所以状态不能放 `remember`，分两层存：
+ * - **跨进程（设置）**：过滤的链路 / 级别 / 关键字 —— [EasyLog.filter]，落盘在
+ *   `SharedPreferences`；改动去抖 [FILTER_SAVE_DELAY_MS] 后写，离开组合时再兜一次。
+ * - **同进程（会话态）**：暂停、停在外观页、展开了哪几行 —— [PanelSessionState]。
+ * 一句话：点悬浮球重新打开，看到的是离开时那个面板，而不是一个刚出厂的默认态。
  */
 @Composable
 internal fun LogPanel(
@@ -93,21 +106,39 @@ internal fun LogPanel(
     val context = LocalContext.current
     val colors: ConsoleColors = LocalConsoleColors.current
 
-    var traceFilter by remember { mutableStateOf<String?>(null) }
-    var minLevel by remember { mutableStateOf(LogLevel.DEBUG) }
-    var query by remember { mutableStateOf("") }
-    var paused by remember { mutableStateOf(false) }
-    var settingsOpen by remember { mutableStateOf(false) }
+    // 过滤条件：跨进程记住 —— 初值就是上次落盘的那套
+    val initialFilter = remember { EasyLog.filter }
+    var traceFilter by remember { mutableStateOf(initialFilter.trace) }
+    var minLevel by remember { mutableStateOf(initialFilter.minLevel) }
+    var query by remember { mutableStateOf(initialFilter.query) }
+
+    // 会话态（暂停 / 停在外观页 / 展开了哪几行）：同一进程里关掉再打开跟没关过一样。
+    // 这三项不落盘，原因见 PanelSessionState 的注释
+    val paused = PanelSessionState.paused
+    val settingsOpen = PanelSessionState.settingsOpen
+    val expanded = PanelSessionState.expandedIds
 
     val rows = remember { mutableStateListOf<UiRow>() }
     val traces = remember { mutableStateListOf<String>() }
-    var expanded by remember { mutableStateOf(emptySet<Long>()) }
 
     var lastId by remember { mutableLongStateOf(0L) }
     var totalCount by remember { mutableStateOf(0) }
 
     val listState = rememberLazyListState()
-    val filters = Filters(traceFilter, minLevel, query)
+    val filters = ConsoleFilter(traceFilter, minLevel, query)
+
+    // 输入时去抖落盘（一个词不该换十几次磁盘写）
+    LaunchedEffect(filters) {
+        if (filters == EasyLog.filter) return@LaunchedEffect
+        delay(FILTER_SAVE_DELAY_MS)
+        EasyLog.setFilter(filters)
+    }
+    // 离开组合（关面板 / 页面销毁 / 用户把日志台关掉）时再兜一次：
+    // 「敲完关键字立刻点 ✕」不会因为没到去抖时间而丢掉这次的输入
+    val latestFilters = rememberUpdatedState(filters)
+    DisposableEffect(Unit) {
+        onDispose { EasyLog.setFilter(latestFilters.value) }
+    }
 
     LaunchedEffect(filters, paused) {
         val all = EasyLog.entries()
@@ -117,7 +148,7 @@ internal fun LogPanel(
 
         rows.clear()
         var previousTime = 0L
-        for (entry in all.filter { it.matches(filters) }) {
+        for (entry in all.filter { filters.matches(it) }) {
             rows.add(0, UiRow(entry, deltaOf(entry, previousTime)))
             previousTime = entry.timeMillis
         }
@@ -134,7 +165,7 @@ internal fun LogPanel(
             lastId = fresh.last().id
             var newestTime = rows.firstOrNull()?.entry?.timeMillis ?: 0L
             for (entry in fresh) {
-                if (!entry.matches(filters)) continue
+                if (!filters.matches(entry)) continue
                 rows.add(0, UiRow(entry, deltaOf(entry, newestTime)))
                 newestTime = entry.timeMillis
             }
@@ -170,10 +201,11 @@ internal fun LogPanel(
                 paused = paused,
                 settingsOpen = settingsOpen,
                 colors = colors,
-                onTogglePause = { paused = !paused },
-                onToggleSettings = { settingsOpen = !settingsOpen },
+                onTogglePause = { PanelSessionState.paused = !paused },
+                onToggleSettings = { PanelSessionState.settingsOpen = !settingsOpen },
                 onClear = {
                     EasyLog.clear()
+                    PanelSessionState.forgetExpanded()
                     rows.clear()
                     lastId = 0L
                     totalCount = 0
@@ -204,7 +236,13 @@ internal fun LogPanel(
                         contentAlignment = Alignment.Center,
                     ) {
                         BasicText(
-                            text = "暂无日志 · 触发一次链路看看",
+                            // 有过滤条件却空着，必须说清楚是「筛没了」还是「真没有」，
+                            // 否则用户会以为日志没在采
+                            text = if (filters.isDefault) {
+                                "暂无日志 · 触发一次链路看看"
+                            } else {
+                                "当前过滤条件下没有日志 · 点「全部链路」或清空关键字"
+                            },
                             style = ConsoleStyle.meta(colors).copy(fontSize = 12.sp),
                         )
                     }
@@ -221,11 +259,12 @@ internal fun LogPanel(
                                 expanded = row.entry.id in expanded,
                                 showThread = config.showThreadName,
                                 onClick = {
-                                    expanded = if (row.entry.id in expanded) {
-                                        expanded - row.entry.id
-                                    } else {
-                                        expanded + row.entry.id
-                                    }
+                                    PanelSessionState.expandedIds =
+                                        if (row.entry.id in expanded) {
+                                            expanded - row.entry.id
+                                        } else {
+                                            expanded + row.entry.id
+                                        }
                                 },
                                 onLongClick = { copyToClipboard(context, listOf(row)) },
                             )
@@ -234,10 +273,12 @@ internal fun LogPanel(
                 }
 
                 val fileState = if (EasyLog.isFileLogging) " · 落盘中" else ""
+                // 过滤生效时把命中数摆出来：光看列表变短不容易判断是「筛掉了」还是「没日志进来」
+                val filterState = if (filters.isDefault) "" else " · 筛出 ${rows.size} 条"
                 BasicText(
                     text = when {
-                        paused -> "已暂停 · 点「继续」恢复刷新$fileState"
-                        else -> "共 $totalCount 条 · 自动跟随最新$fileState"
+                        paused -> "已暂停 · 点「继续」恢复刷新$filterState$fileState"
+                        else -> "共 $totalCount 条$filterState · 自动跟随最新$fileState"
                     },
                     style = ConsoleStyle.meta(colors).copy(fontSize = 9.sp),
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
@@ -249,17 +290,6 @@ internal fun LogPanel(
 
 private fun deltaOf(entry: LogEntry, previousTime: Long): Long =
     if (previousTime == 0L) -1L else entry.timeMillis - previousTime
-
-private fun LogEntry.matches(filters: Filters): Boolean {
-    if (filters.trace != null && trace != filters.trace) return false
-    if (!level.covers(filters.minLevel)) return false
-    val q = filters.query.trim()
-    if (q.isEmpty()) return true
-    return message.contains(q, ignoreCase = true) ||
-        module.contains(q, ignoreCase = true) ||
-        category.contains(q, ignoreCase = true) ||
-        trace.contains(q, ignoreCase = true)
-}
 
 // ── 头部 ──────────────────────────────────────────────────────────
 
@@ -333,6 +363,14 @@ private fun TraceChips(
     colors: ConsoleColors,
     onSelect: (String?) -> Unit,
 ) {
+    // 上次记住的链路这一轮还没出现过（清空过日志、或换了一条链路在测）：
+    // 把选中项补在最前面。否则 chips 上一个高亮的都没有、列表却是空的，
+    // 看起来像「面板坏了」，用户根本不知道该点哪里才能退回去。
+    val visible = if (selected != null && traces.none { it == selected }) {
+        listOf(selected) + traces
+    } else {
+        traces
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -341,7 +379,7 @@ private fun TraceChips(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Chip(text = "全部链路", selected = selected == null, colors = colors) { onSelect(null) }
-        traces.forEach { trace ->
+        visible.forEach { trace ->
             Chip(text = trace, selected = selected == trace, colors = colors) {
                 onSelect(if (selected == trace) null else trace)
             }

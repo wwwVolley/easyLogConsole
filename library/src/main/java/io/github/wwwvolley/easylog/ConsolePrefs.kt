@@ -63,6 +63,49 @@ internal class ConsolePrefs(context: Context?) {
             else prefs?.edit()?.putString(KEY_PALETTE, value)?.apply()
         }
 
+    /**
+     * 上次用的过滤条件。三个键任意一个存在就认为「用户调过」，
+     * 全都不存在时返回 `null`，调用方回落到默认值。
+     *
+     * 级别按枚举名存（不是 ordinal）：以后往 [LogLevel] 中间插一个级别时，
+     * 存序号会把老用户的偏好整体错位一格。
+     */
+    var filter: ConsoleFilter?
+        get() {
+            val p = prefs ?: return null
+            if (!p.contains(KEY_FILTER_TRACE) &&
+                !p.contains(KEY_FILTER_LEVEL) &&
+                !p.contains(KEY_FILTER_QUERY)
+            ) {
+                return null
+            }
+            val level = p.getString(KEY_FILTER_LEVEL, null)
+                ?.let { saved -> LogLevel.entries.firstOrNull { it.name == saved } }
+                ?: LogLevel.DEBUG
+            return ConsoleFilter(
+                trace = p.getString(KEY_FILTER_TRACE, null),
+                minLevel = level,
+                query = p.getString(KEY_FILTER_QUERY, "") ?: "",
+            )
+        }
+        set(value) {
+            val editor = prefs?.edit() ?: return
+            if (value == null) {
+                editor
+                    .remove(KEY_FILTER_TRACE)
+                    .remove(KEY_FILTER_LEVEL)
+                    .remove(KEY_FILTER_QUERY)
+                    .apply()
+                return
+            }
+            // trace 为 null 表示「全部链路」，要把老值删掉，否则下次读出来还是旧链路
+            editor.putString(KEY_FILTER_LEVEL, value.minLevel.name)
+                .putString(KEY_FILTER_QUERY, value.query)
+            if (value.trace == null) editor.remove(KEY_FILTER_TRACE)
+            else editor.putString(KEY_FILTER_TRACE, value.trace)
+            editor.apply()
+        }
+
     private fun putFloat(key: String, value: Float?) {
         val editor = prefs?.edit() ?: return
         if (value == null) editor.remove(key).apply() else editor.putFloat(key, value).apply()
@@ -77,5 +120,8 @@ internal class ConsolePrefs(context: Context?) {
         const val KEY_BALL_ALPHA = "ball_alpha"
         const val KEY_SCRIM_ALPHA = "scrim_alpha"
         const val KEY_PALETTE = "palette"
+        const val KEY_FILTER_TRACE = "filter_trace"
+        const val KEY_FILTER_LEVEL = "filter_level"
+        const val KEY_FILTER_QUERY = "filter_query"
     }
 }
