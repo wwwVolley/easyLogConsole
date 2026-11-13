@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 本库不声明任何权限、组件或初始化项：装上去就能用，宿主的清单一行都不用改。 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

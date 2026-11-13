@@ -1,0 +1,8 @@
+# 统一行尾：仓库里一律 LF，Windows 检出也不转换成 CRLF，
+# 免得每次提交都跳出一堆 "LF will be replaced by CRLF" 警告、diff 里全是整行变更。
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.jar binary
+*.png binary
+*.aar binary
