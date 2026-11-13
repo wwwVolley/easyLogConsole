@@ -163,6 +163,11 @@ data class EasyLogConfig(
             "Desktop",
             "SurfaceComposerClient",
             "SurfaceFlinger",
+            "PhoneWindow",
+            "HardwareRenderer",
+            "NativeCFMS",
+            "NativeCustom",
+            "PerfManager",
         )
     }
 }
