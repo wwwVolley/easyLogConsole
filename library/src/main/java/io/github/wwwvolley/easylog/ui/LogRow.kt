@@ -15,10 +15,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.wwwvolley.easylog.ConsoleColors
 import io.github.wwwvolley.easylog.EasyLogTime
 import io.github.wwwvolley.easylog.LogEntry
 import io.github.wwwvolley.easylog.LogLevel
@@ -41,6 +43,7 @@ internal data class UiRow(
  *   而不是「几点几分几秒」。
  * - 正文默认最多 3 行，点一下展开全部。真机上没法横滑，长报文折行读比左右拖现实。
  * - STEP 与 ERROR 左侧有 2dp 色条，手指快速滚动时靠色块定位，不用逐行读文字。
+ * - 颜色全部来自 [LocalConsoleColors]：面板里换配色，这里整片跟着变，不用重启。
  */
 @Composable
 internal fun LogRow(
@@ -50,16 +53,17 @@ internal fun LogRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit,
 ) {
+    val colors: ConsoleColors = LocalConsoleColors.current
     val entry = row.entry
-    val levelColor = ConsoleStyle.colorOf(entry.level)
+    val levelColor = argb(colors.colorOf(entry.level))
     val emphasize = entry.level == LogLevel.STEP || entry.level == LogLevel.ERROR
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                if (entry.level == LogLevel.ERROR) ConsoleStyle.Error.copy(alpha = 0.07f)
-                else ConsoleStyle.Panel.copy(alpha = 0f),
+                if (entry.level == LogLevel.ERROR) levelColor.copy(alpha = 0.07f)
+                else Color.Transparent,
             )
             .pointerInput(entry.id) {
                 detectTapGestures(
@@ -82,19 +86,21 @@ internal fun LogRow(
             Row {
                 BasicText(
                     text = EasyLogTime.formatClock(entry.timeMillis),
-                    style = ConsoleStyle.MetaStyle,
+                    style = ConsoleStyle.meta(colors),
                 )
                 if (row.deltaMillis >= 0L) {
                     Spacer(Modifier.width(6.dp))
                     BasicText(
                         text = EasyLogTime.formatDelta(row.deltaMillis),
-                        style = ConsoleStyle.MetaStyle.copy(color = ConsoleStyle.TextTertiary.copy(alpha = 0.75f)),
+                        style = ConsoleStyle.meta(colors).copy(
+                            color = argb(colors.textTertiary).copy(alpha = 0.75f),
+                        ),
                     )
                 }
                 Spacer(Modifier.width(6.dp))
                 BasicText(
                     text = entry.level.label,
-                    style = ConsoleStyle.MetaStyle.copy(
+                    style = ConsoleStyle.meta(colors).copy(
                         color = levelColor,
                         fontWeight = if (emphasize) FontWeight.Medium else FontWeight.Normal,
                     ),
@@ -103,7 +109,7 @@ internal fun LogRow(
                     Spacer(Modifier.width(6.dp))
                     BasicText(
                         text = entry.scopeLabel,
-                        style = ConsoleStyle.MetaStyle.copy(color = levelColor.copy(alpha = 0.85f)),
+                        style = ConsoleStyle.meta(colors).copy(color = levelColor.copy(alpha = 0.85f)),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -112,7 +118,7 @@ internal fun LogRow(
                     Spacer(Modifier.width(6.dp))
                     BasicText(
                         text = "@${entry.threadName}",
-                        style = ConsoleStyle.MetaStyle.copy(color = ConsoleStyle.TextTertiary),
+                        style = ConsoleStyle.meta(colors),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -121,11 +127,11 @@ internal fun LogRow(
 
             BasicText(
                 text = entry.message,
-                style = ConsoleStyle.MessageStyle.copy(
+                style = ConsoleStyle.message(colors).copy(
                     color = when (entry.level) {
-                        LogLevel.ERROR -> ConsoleStyle.ErrorText
-                        LogLevel.STEP -> ConsoleStyle.StepText
-                        else -> ConsoleStyle.TextPrimary
+                        LogLevel.ERROR -> argb(colors.errorText)
+                        LogLevel.STEP -> argb(colors.stepText)
+                        else -> argb(colors.text)
                     },
                 ),
                 maxLines = if (expanded) Int.MAX_VALUE else 3,
@@ -135,7 +141,7 @@ internal fun LogRow(
             entry.throwable?.let { stack ->
                 BasicText(
                     text = stack,
-                    style = ConsoleStyle.MetaStyle.copy(color = ConsoleStyle.Error.copy(alpha = 0.8f)),
+                    style = ConsoleStyle.meta(colors).copy(color = levelColor.copy(alpha = 0.8f)),
                     maxLines = if (expanded) Int.MAX_VALUE else 2,
                     overflow = TextOverflow.Ellipsis,
                 )

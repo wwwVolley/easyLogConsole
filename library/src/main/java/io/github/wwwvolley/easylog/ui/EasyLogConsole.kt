@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -35,6 +36,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.wwwvolley.easylog.ConsoleAppearance
+import io.github.wwwvolley.easylog.ConsoleColors
 import io.github.wwwvolley.easylog.EasyLog
 import io.github.wwwvolley.easylog.EasyLogConfig
 import io.github.wwwvolley.easylog.EasyLogConsoleController
@@ -43,7 +46,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * 日志台入口：一个可拖动的悬浮球，点开就是半透明日志面板。
+ * 日志台入口：一个半透明可拖动的悬浮球，点开就是半透明日志面板。
  *
  * ## 放哪里
  * 放在 Compose 根布局的最外层（`setContent` 里、所有页面之上）：
@@ -55,18 +58,36 @@ import kotlin.math.roundToInt
  * ```
  * 单 Activity 的工程挂在根上，页面来回切它都不重建、日志滚动位置也不会丢。
  *
+ * ## 只在 debug 包出现
+ * 首行的 [EasyLog.isAvailable] 判的就是这个：`debugOnly = true`（默认）时
+ * release 签名包里它恒为 `false`，整个 Composable 一行都不画、也不注册任何监听。
+ * 判定依据是 `ApplicationInfo.FLAG_DEBUGGABLE`，不是宿主的 `BuildConfig.DEBUG`。
+ *
  * ## 为什么自己不消费触摸
  * 收起态只有一个球，`Box` 本身不挂任何指针输入，空白区域的触摸会直接落到下面的页面上；
- * 展开态才铺一层 scrim 接管点击（点面板外收起）。用 `WindowManager` 加悬浮窗那套
- * 反而要额外权限、还要自己处理 Insets 和主题，单 Activity 工程没必要。
+ * 展开态才铺一层很淡的 scrim 接管点击（点面板外收起）。
+ *
+ * ## 为什么不用 `Modifier.alpha` 做半透明
+ * 透明度加在**颜色**上，不加在节点上：节点级 alpha 会让 Compose 走离屏合成并按节点边界裁剪，
+ * 探出球体的红点会被削掉一角（这个坑在别处踩过，别改回去）。拖动时球会临时加深到接近实心，
+ * 松手再淡回去 —— 拖的时候手指压着看不清位置，是拖拽体验里最容易被抱怨的一点。
  */
 @Composable
 fun EasyLogConsole(modifier: Modifier = Modifier) {
+    // release 包（或宿主显式关掉 debugOnly）在这里就退出：不注册监听、不轮询
+    if (!EasyLog.isAvailable) return
+
     val config = EasyLog.currentConfig
 
     var enabled by remember { mutableStateOf(EasyLog.isEnabled) }
     DisposableEffect(Unit) {
         val handle = EasyLog.addEnabledListener { enabled = it }
+        onDispose { handle.close() }
+    }
+
+    var appearance by remember { mutableStateOf(EasyLog.appearance) }
+    DisposableEffect(Unit) {
+        val handle = EasyLog.addAppearanceListener { appearance = it }
         onDispose { handle.close() }
     }
 
@@ -76,26 +97,45 @@ fun EasyLogConsole(modifier: Modifier = Modifier) {
         onDispose { handle.close() }
     }
 
+    // 宿主强制显隐优先；没设过就每 500ms 问一次条件
+    var override by remember { mutableStateOf(EasyLogConsoleController.ballVisibleOverride) }
+    DisposableEffect(Unit) {
+        val handle = EasyLogConsoleController.addBallVisibilityListener { override = it }
+        onDispose { handle.close() }
+    }
+    var policyVisible by remember(config.ballVisibility) { mutableStateOf(config.ballVisibility.shouldShow()) }
+    LaunchedEffect(config.ballVisibility) {
+        while (true) {
+            delay(POLICY_INTERVAL_MS)
+            policyVisible = config.ballVisibility.shouldShow()
+        }
+    }
+
     if (!enabled) return
 
-    Box(modifier = modifier.fillMaxSize()) {
-        when {
-            open -> LogPanel(
-                config = config,
-                onClose = {
-                    EasyLogConsoleController.hide()
-                    seenErrorCount = EasyLog.errorCount()
-                },
-            )
+    CompositionLocalProvider(LocalConsoleColors provides appearance.colors) {
+        Box(modifier = modifier.fillMaxSize()) {
+            when {
+                open -> LogPanel(
+                    config = config,
+                    appearance = appearance,
+                    onClose = {
+                        EasyLogConsoleController.hide()
+                        seenErrorCount = EasyLog.errorCount()
+                    },
+                )
 
-            config.trigger == EasyLogConfig.Trigger.FloatingBall -> FloatingBall(
-                onOpen = {
-                    EasyLogConsoleController.show()
-                    seenErrorCount = EasyLog.errorCount()
-                },
-            )
+                config.trigger == EasyLogConfig.Trigger.FloatingBall &&
+                    (override ?: policyVisible) -> FloatingBall(
+                    appearance = appearance,
+                    onOpen = {
+                        EasyLogConsoleController.show()
+                        seenErrorCount = EasyLog.errorCount()
+                    },
+                )
 
-            else -> Unit
+                else -> Unit
+            }
         }
     }
 }
@@ -108,27 +148,36 @@ fun EasyLogConsole(modifier: Modifier = Modifier) {
  */
 private var seenErrorCount by mutableStateOf(EasyLog.errorCount())
 
+private const val POLICY_INTERVAL_MS = 500L
+
 /**
  * 悬浮球。
  *
+ * - 半透明（`ballAlpha`，面板里可调），不挡看不见的页面内容；
  * - 拖动松手后吸附到最近的左右边，位置按屏幕比例持久化，重启后还在原地；
  * - 有新的 WARN/ERROR 时右上角带红色计数，点开一次即清零；
  * - 拖动与点击用两个 `pointerInput`：点击检测等触摸超过 slop 才让位给拖动，
  *   手指轻点不会因为一个像素的抖动被判成「拖了一下」。
  */
 @Composable
-private fun FloatingBall(onOpen: () -> Unit) {
+private fun FloatingBall(appearance: ConsoleAppearance, onOpen: () -> Unit) {
     val density = LocalDensity.current
     val scope = rememberCoroutineScope()
+    val colors: ConsoleColors = LocalConsoleColors.current
 
     var totalErrors by remember { mutableLongStateOf(EasyLog.errorCount()) }
     LaunchedEffect(Unit) {
         while (true) {
-            delay(500)
+            delay(POLICY_INTERVAL_MS)
             totalErrors = EasyLog.errorCount()
         }
     }
     val unread = (totalErrors - seenErrorCount).coerceAtLeast(0L)
+
+    var dragging by remember { mutableStateOf(false) }
+    // 拖动时加深：手指压着球，太透会看不清拖到哪了
+    val alpha = if (dragging) appearance.ballAlpha.coerceAtLeast(0.9f) else appearance.ballAlpha
+    val textAlpha = (alpha + 0.3f).coerceAtMost(1f)
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val ballPx = with(density) { ConsoleStyle.BallSize.toPx() }
@@ -149,7 +198,9 @@ private fun FloatingBall(onOpen: () -> Unit) {
                 .size(ConsoleStyle.BallSize)
                 .pointerInput(maxX, maxY) {
                     detectDragGestures(
+                        onDragStart = { dragging = true },
                         onDragEnd = {
+                            dragging = false
                             val targetX = if (position.value.x < maxX / 2f) 0f else maxX
                             scope.launch {
                                 position.animateTo(Offset(targetX, position.value.y), tween(160))
@@ -161,6 +212,7 @@ private fun FloatingBall(onOpen: () -> Unit) {
                                     (targetX / maxX) to (position.value.y / maxY)
                             }
                         },
+                        onDragCancel = { dragging = false },
                     ) { change, drag ->
                         change.consume()
                         val nx = (position.value.x + drag.x).coerceIn(0f, maxX)
@@ -177,12 +229,19 @@ private fun FloatingBall(onOpen: () -> Unit) {
                 modifier = Modifier
                     .matchParentSize()
                     .clip(CircleShape)
-                    .background(ConsoleStyle.BallBackground)
-                    .border(0.5.dp, ConsoleStyle.Stroke, CircleShape),
+                    .background(argb(colors.ballBackground).copy(alpha = alpha))
+                    .border(
+                        width = 0.5.dp,
+                        color = argb(colors.stroke).copy(alpha = (alpha + 0.2f).coerceAtMost(1f)),
+                        shape = CircleShape,
+                    ),
             ) {
                 BasicText(
                     text = "LOG",
-                    style = ConsoleStyle.TitleStyle.copy(fontSize = 12.sp),
+                    style = ConsoleStyle.title(colors).copy(
+                        fontSize = 12.sp,
+                        color = argb(colors.text).copy(alpha = textAlpha),
+                    ),
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
@@ -193,13 +252,13 @@ private fun FloatingBall(onOpen: () -> Unit) {
                         .align(Alignment.TopEnd)
                         .offset(x = 4.dp, y = (-4).dp)
                         .clip(RoundedCornerShape(999.dp))
-                        .background(ConsoleStyle.Badge)
+                        .background(argb(colors.badge).copy(alpha = alpha.coerceAtLeast(0.9f)))
                         .padding(horizontal = 4.dp, vertical = 1.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     BasicText(
                         text = if (unread > 99) "99+" else unread.toString(),
-                        style = ConsoleStyle.MetaStyle.copy(fontSize = 8.sp, color = Color.White),
+                        style = ConsoleStyle.meta(colors).copy(fontSize = 8.sp, color = Color.White),
                     )
                 }
             }

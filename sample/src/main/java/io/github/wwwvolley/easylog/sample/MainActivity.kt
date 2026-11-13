@@ -1,6 +1,7 @@
 package io.github.wwwvolley.easylog.sample
 
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
@@ -26,14 +27,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.github.wwwvolley.easylog.BallVisibility
+import io.github.wwwvolley.easylog.ConsolePalette
 import io.github.wwwvolley.easylog.EasyLog
 import io.github.wwwvolley.easylog.EasyLogConfig
+import io.github.wwwvolley.easylog.EasyLogConsoleController
+import io.github.wwwvolley.easylog.LogFileConfig
 import io.github.wwwvolley.easylog.LogLevel
 import io.github.wwwvolley.easylog.installEasyLogOverlay
+import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -52,9 +59,25 @@ class MainActivity : ComponentActivity() {
         EasyLog.install(
             this,
             EasyLogConfig(
+                // 默认就是 true：release 签名包里日志台一行都不画。
+                // 这里显式写出来，是为了让示例本身就是「正确用法」的样板
+                debugOnly = true,
                 capacity = 2000,
                 panelHeightFraction = 0.66f,
                 showThreadName = false,
+                // 悬浮球半透明，不挡页面；面板 80%、遮罩 30%，进面板还能「外观」页再调
+                ballAlpha = 0.5f,
+                panelAlpha = 0.8f,
+                scrimAlpha = 0.25f,
+                // 落盘：目录由宿主指定，库只 append 自己的文件。
+                // 模拟器/真机上 adb pull 这个路径就能拿到日志
+                file = LogFileConfig(
+                    directory = File(getExternalFilesDir(null), "easylog"),
+                    minLevel = LogLevel.DEBUG,
+                ),
+                // 自定义触发：这里演示「只在打过标记之后才出现」。
+                // 宿主可以换成「登录后才出现」「只在配网页出现」之类的任意条件
+                ballVisibility = BallVisibility { true },
             ),
         )
         setContent { SampleScreen() }
@@ -66,6 +89,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun SampleScreen() {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var tapCount by remember { mutableIntStateOf(0) }
 
     Column(
@@ -106,6 +130,21 @@ private fun SampleScreen() {
             }
         }
         Action("点我计数：$tapCount") { tapCount++ }
+        Action("切换配色（暗色 → 终端绿 → 亮色）") {
+            val order = ConsolePalette.entries
+            val index = order.indexOf(EasyLog.currentPalette ?: order.last())
+            EasyLog.updateAppearance(palette = order[(index + 1) % order.size])
+        }
+        Action("临时藏起悬浮球 3 秒（录屏/截图场景）") {
+            scope.launch {
+                EasyLogConsoleController.setBallVisible(false)
+                delay(3_000)
+                EasyLogConsoleController.setBallVisible(null)
+            }
+        }
+        Action("落盘路径") {
+            Toast.makeText(context, EasyLog.fileLogPath ?: "未开启落盘", Toast.LENGTH_LONG).show()
+        }
     }
 }
 
