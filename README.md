@@ -6,157 +6,180 @@ App 内悬浮日志台：一个半透明悬浮球 + 一块半透明日志面板�
 
 ---
 
-## 特性
+## 接入：一行依赖，零行代码
+
+```kotlin
+// app/build.gradle.kts
+dependencies {
+    debugImplementation("io.github.wwwvolley:easylog-console:1.0.0")
+}
+```
+
+**完了。** 不需要改 `Application`，不需要改根布局，不需要动任何一行日志打点 ——
+库自带一个 ContentProvider，进程启动时自动完成三件事：
+
+1. 用默认配置把库装起来；
+2. 开始采集**本进程**的 logcat；
+3. 把悬浮球挂到每个 Activity 的 `decorView` 上（最上层，空白区不挡点击）。
+
+你原来的 `Log.d/i/w/e`、`AppLog`、Android Studio 的 Logcat 窗口，全部照旧。
+
+> 为什么不用 `implementation`：`debugImplementation` 让 release 包**连这个 AAR 都不打进去**，
+> 比运行时判断更彻底 —— 包体零增长，反编译也看不到。
 
 | | |
 |---|---|
-| 只在 debug 出现 | 默认 `debugOnly`，用 `FLAG_DEBUGGABLE` 判定；release 签名包里浮层不渲染、`accept` 直接 return |
-| 接入成本 | 3 行；业务打点代码零改动（挂在已有日志出口后面即可） |
-| 不影响控制台 | **不接管 Android Studio Logcat**：宿主的 `Log.x` 一行不用改，库只是旁路复制一份 |
-| 悬浮球 | 半透明（默认 50%，可调）、可拖动、松手吸附左右边、位置记忆；有新的 WARN/ERROR 时带未读红点 |
+| 只在 debug 出现 | `debugImplementation` + `debugOnly`（`FLAG_DEBUGGABLE`）双保险；release 包连类都没有 |
+| 接入成本 | **1 行依赖 / 0 行代码** |
+| 不影响控制台 | 从不调 `android.util.Log`，也从不拦截它 —— 只是多读了一份自己的 logcat |
+| 悬浮球 | 半透明（默认 55%，可调）、可拖动、松手吸附左右边、位置记忆；有新的 WARN/ERROR 时带未读红点 |
 | 显示条件 | `BallVisibility` 自定义「什么时候出现」，也可运行时 `setBallVisible()` 临时隐藏 |
 | 面板 | 半透明（默认 82%，可调）、遮罩浓度可调；能一边看日志一边操作界面；键盘弹出自动上移 |
 | 外观 | 面板 / 球 / 遮罩三个滑杆 + 三套配色（暗色 / 终端绿 / 亮色），面板内实时调、持久化 |
-| 落盘 | 可选。目录、文件名模板、滚动大小、保留数量全由开发者指定；异步批量写，不阻塞打点线程 |
-| 过滤 | 链路（trace）/ 级别 / 关键字 三个维度，边打边看 |
+| 落盘 | 可选，默认**一个字节都不写**。目录、文件名模板、滚动大小、保留数量全由开发者指定 |
+| 过滤 | 链路（tag）/ 级别 / 关键字 三个维度，边打边看 |
 | 行信息 | 时间 + **与上一行的间隔** + 级别 + 模块·分类 + 正文；点开看全文，长按复制单条 |
 | 性能 | 写端只入环形缓冲，UI 每 120ms 拉一次增量：瞬间刷 300 条也只触发一次重组 |
 | 体积 | 零三方依赖（只有 Compose + core-ktx）；核心层无 Compose 依赖，可纯 JVM 单测 |
 
 ---
 
-## 接入
+## 日志是怎么进来的
 
-### 1. 依赖
+**读本进程的 logcat**（`logcat -v threadtime --pid=<自身>`），不是 hook `Log`。
 
-库还没发到公共仓库，用下面任一方式：
+- 不用改任何打点代码：`Log.i("YBDL", "[PROVISION][连接] 开始连接")` 直接就能在面板里看到；
+- 不用加权限：Android 4.1 起普通应用只能读到自己进程的日志；
+- 不影响控制台：logcat 可以有很多 consumer，我们只是其中一个；
+- 格式兼容：正文的 `[模块][分类]` 前缀会被拆成「模块 · 分类」两段，最多两段、每段 ≤16 字，报文里的方括号不会被误拆。
 
-**A. 复合构建（同一台机器上有源码，改一行两边生效，推荐开发期用）**
-
-```kotlin
-// settings.gradle.kts
-includeBuild("../easyLogConsole") {
-    dependencySubstitution {
-        substitute(module("io.github.wwwvolley:easylog-console"))
-            .using(project(":library"))
-    }
-}
-```
+### 关键节点：正文以 `★` 开头
 
 ```kotlin
-// app/build.gradle.kts
-dependencies { implementation("io.github.wwwvolley:easylog-console:1.0.0") }
+Log.i("YBDL", "★ [连接][流程] connectGatt(autoConnect=false)")
 ```
 
-**B. 发到本地 Maven**
+面板里这行会显示成绿色色条 + 绿色星标，手指快速滚动时一眼能定位。
 
-```bash
-./gradlew :library:publishToMavenLocal     # 之后正常 implementation 即可
-```
+### 默认降噪
 
-**C. 发到 GitHub Packages / 内网 Nexus**：改 `library/build.gradle.kts` 里 `publishing.repositories` 一段。
+每个 debug 包的 logcat 里都有大量和业务无关的行（`Choreographer`、`OpenGLRenderer`、
+`VRI[...]`、ART 的 JIT、三星的 `IDS_TAG`……），默认按 **tag 前缀**挡掉一批，
+并且丢弃「tag 就是本应用包名」的行（`W com.foo.bar usrcalluqfd: ...` 这种）。
+默认还丢掉了 VERBOSE 一档。
 
-### 2. 初始化（Application）
+嫌不够/嫌太多就自己调：
 
 ```kotlin
-EasyLog.install(
-    this,
-    EasyLogConfig(
-        debugOnly = true,            // 默认值；release 包不出现，别改成 false
-        capacity = 3000,
-        ballAlpha = 0.5f,            // 悬浮球半透明，不挡页面
-        panelAlpha = 0.82f,          // 面板半透明，能看见底下的界面
-        // 需要留存日志时才配；不配 = 一个文件都不写
-        file = LogFileConfig(directory = File(filesDir, "easylog")),
+EasyLogConfig(
+    logcatMinLevel = LogLevel.INFO,          // 更安静
+    logcatTags = setOf("YBDL"),              // 只收自己的业务 tag
+    logcatIgnoreTags = emptySet(),           // 一条都不挡，全量收
+)
+```
+
+---
+
+## 想要自定义配置（1 行）
+
+```kotlin
+// Application.onCreate()
+EasyLog.install(this, EasyLogConfig(logcatTags = setOf("YBDL"), capacity = 5000))
+```
+
+初始化是幂等的：自动初始化先跑过也没关系，这里的配置会覆盖它（仅这一次）。
+
+如果连那点开销都不想要，在清单里关掉自动初始化：
+
+```xml
+<application>
+    <meta-data
+        android:name="io.github.wwwvolley.easylog.AUTO_INIT"
+        android:value="false" />
+</application>
+```
+
+关掉之后要自己 `EasyLog.install(this)` 或 `installEasyLogOverlay()`。
+
+---
+
+## 落盘（可选，默认不写文件）
+
+```kotlin
+EasyLog.startFileLogging(
+    LogFileConfig(
+        directory = File(getExternalFilesDir(null), "easylog"), // 目录你说了算
+        minLevel = LogLevel.DEBUG,
+        maxFileBytes = 2L * 1024 * 1024,                        // 超过就滚动
+        maxFiles = 5,                                           // 保留 5 份
     ),
 )
 ```
 
-### 3. 挂载界面（二选一，效果一样，别同时用）
+- 默认 `file = null` = **一个字节都不写**，完全不碰宿主自己的日志目录；
+- 只 append 自己生成的那个文件及 `.1 .2 …` 滚动副本，不删、不截断别人的文件；
+- 打点线程只 `offer` 进队列，单线程每 800ms 批量 write + flush，不阻塞 BLE 回调；
+- 面板「外观」页能看到当前落盘路径，也能一键导出当前缓冲区。
 
-**Compose 工程**（推荐，少一层 View）：
+`EasyLog.exportTo(File)` 是一次性导出，不影响落盘任务。
 
-```kotlin
-setContent {
-    Box(Modifier.fillMaxSize()) {
-        AppNavHost(...)
-        EasyLogConsole()        // 放最外层，页面切换时不重建、滚动位置不丢
-    }
-}
-```
+---
 
-**View / 老工程**：
+## 不想用 logcat（精确投递）
+
+有两条纯 API 的路，适合「不想让系统日志进来」「需要精确的模块/分类/异常堆栈」的工程：
 
 ```kotlin
-override fun onCreate(savedInstanceState: Bundle?) {
-    super.onCreate(savedInstanceState)
-    setContentView(R.layout.activity_main)
-    installEasyLogOverlay()     // 往 decorView 挂一个 ComposeView
-}
+// 1) 结构化：模块、分类、级别都由你给
+EasyLog.record(LogLevel.INFO, trace = "PROVISION", module = "连接", category = "数据", message = "MTU=247")
+
+// 2) 兼容老格式：正文写 `[模块][分类] 正文`，库自己拆
+EasyLog.accept(LogLevel.WARN, tag = "PROVISION", message = "[下发][异常] GATT 133，重试 1/2")
 ```
 
-> 浮层盖在内容之上，但**空白区域不消费触摸**，业务点击照常穿透；只有球和面板本身吃事件。
-
-### 4. 接已有的日志出口（关键一步）
-
-库里**不拦截 logcat**，而是提供一个入口，谁接谁负责。宿主要做的只是把已有日志转进来：
+已经有日志出口的，把 sink 挂上去即可（业务打点代码照样不用改）：
 
 ```kotlin
-// 例：项目里已有的 AppLog 薄封装
-object AppLog {
-    var sink: ((LogLevel, String, String, Throwable?) -> Unit)? = null
-
-    fun w(tag: String, msg: String, t: Throwable? = null) {
-        Log.w("APP", "[$tag] $msg", t)                 // ← 控制台照旧输出，一行没改
-        sink?.invoke(io.github.wwwvolley.easylog.LogLevel.WARN, tag, msg, t)   // ← 旁路复制
-    }
-}
-
-// Application 里接上
-AppLog.sink = { level, tag, msg, t -> EasyLog.accept(level, tag, msg, t) }
+AppLog.sink = { level, tag, msg, throwable -> EasyLog.accept(level.toEasyLogLevel(), tag, msg, throwable) }
 ```
 
-`accept` 会自动把正文开头的 `[模块][分类]` 拆成两个维度（最多两段、每段 ≤16 字），所以已有的
-`"[连接][流程] 开始连接"` 这种格式不用改一个字，面板就能按「连接」筛。
+这时建议 `EasyLogConfig(autoCaptureLogcat = false)`，避免两路日志重复。
 
-新代码建议直接用结构化 API：
+---
 
-```kotlin
-EasyLog.step("PROVISION", "扫描", "流程", "开始扫描 6s")      // 关键节点，绿色 + 色条
-EasyLog.record(LogLevel.INFO, "PROVISION", "读SN", "数据", "SN=YB019-..." )
-EasyLog.fail("PROVISION", "云端", "bind-status 轮询超时 15s")  // 红色 + 红点 +1
-```
+## 界面挂载方式（三选一，别同时用）
+
+| 方式 | 用法 | 适用 |
+|---|---|---|
+| **自动**（默认） | 什么都不写 | 99% 的场景 |
+| 手动挂载 | `installEasyLogOverlay()` | 关掉了自动初始化 / 只想在某个 Activity 出现 |
+| 根布局内 | `EasyLogConsole()` | Compose 工程想省一层 View（配 `autoAttachOverlay = false`） |
+
+多 Activity 重建（旋转、深色模式切换）不会叠出两个球 —— `decorView` 上有 tag 去重。
 
 ---
 
 ## 三个「不要影响原页面 / 原有能力」的设计
 
-这是本库最在意的部分，单独说明。
-
 ### 一、不影响 Android Studio 控制台
 
-库**不抢占 `Log`**、不反射、不重定向 `System.out`。宿主的 `Log.d/i/w/e` 原样输出，
-`adb logcat -s YBDL | grep PROVISION` 这套过滤方式完全不变。
-`EasyLog.accept()` 是**旁路**：写进环形缓冲 + 交给可选的文件 sink，走的是另一条路。
+库**从不调用** `android.util.Log`，也从不拦截它。它读的是 logcat 的另一个 consumer，
+你的 `Log.x` 输出、`adb logcat -s YBDL | grep PROVISION` 的过滤方式完全不变。
 
 ### 二、不影响宿主自己的落盘
 
-- 默认 `EasyLogConfig.file = null`，库**一个字节都不写**；
-- 配了之后也只 `append` 自己按 `fileNamePattern` 生成的那个文件及其滚动副本（`.1`、`.2`…），
-  **不删、不截断、不锁**目录里别人的文件；
-- 目录由宿主指定（`filesDir` / `getExternalFilesDir` / 自己的日志目录都行），
-  两边各写各的，最多是同一个目录里多一个名字；
-- 写盘在库自己的单线程上，每 `flushIntervalMs` 批量刷一次；队列满（2 万行）时**丢弃新日志**，
-  绝不让业务线程因为磁盘慢而卡住。
+默认 `file = null`，一个字节都不写。要落盘时也只碰 `LogFileConfig` 指定的目录与文件名模板，
+不删、不截断、不锁别人的文件。
 
 ### 三、不影响原页面观看
 
-- 三处透明度都可调：悬浮球 15%~100%、面板 20%~100%、遮罩 0%~80%；
-- 面板只占屏幕下半部分（`panelHeightFraction`），上半部分页面照常可见可点；
-- 悬浮球半透明靠**颜色 alpha** 实现，不挂 `Modifier.alpha` ——
-  节点级 alpha 会让 Compose 走离屏合成并按节点边界裁剪，探出球体的红点会被削掉一角；
-- 调完的值写进 `SharedPreferences`（`easylog_console`），下次冷启动沿用，
-  「外观 → 恢复默认」清掉这些键回到代码里的默认值。
+球和面板的透明度都加在**颜色 alpha** 上（不是 `Modifier.alpha` —— 那会走离屏合成并按节点边界
+裁剪，把悬浮球上的红点削掉一角），叠在页面上还能看见底下的内容。
+面板默认 82% + 30% 遮罩，进「外观」页能实时拖到 20% ~ 100%。
+浮层的空白区**不消费触摸**，Compose 根没命中任何指针输入时会把事件还给页面。
+
+> 顺带一个坑：`Modifier.alpha != 1f` 会给子树加离屏层并按**节点边界**裁剪，
+> 凡是靠 `offset` / 负 padding 探出父节点的子元素都会被切。红点必须画在未裁剪的外层。
 
 ---
 
@@ -164,46 +187,14 @@ EasyLog.fail("PROVISION", "云端", "bind-status 轮询超时 15s")  // 红色 +
 
 ```kotlin
 EasyLogConfig(
-    ballVisibility = BallVisibility { userRepo.isLoggedIn },   // 每 500ms 问一次，实现要够轻
-    // 也可用现成的：BallVisibility.Always / BallVisibility.AfterFirstOpen
+    ballVisibility = BallVisibility { userRepo.isLoggedIn },   // 每 500ms 问一次，实现要轻
 )
 ```
 
-临时藏（录屏、截图、演示）：
-
-```kotlin
-EasyLogConsoleController.setBallVisible(false)   // 隐藏
-EasyLogConsoleController.setBallVisible(null)    // 交还给 ballVisibility 条件
-```
-
-> 优先级：`setBallVisible()` 覆盖 > `ballVisibility` 条件。
-> `Trigger.Hidden` 则完全不显示球，只由 `EasyLogConsoleController.show()` 打开面板（隐藏入口场景）。
-
----
-
-## 落盘（`LogFileConfig`）
-
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `directory` | 必填 | 目录，不存在会自动创建；创建失败会在面板「外观 → 落盘」里显示原因 |
-| `fileNamePattern` | `easylog_{date}.log` | 占位符：`{date}` `{time}` `{datetime}` `{pid}` `{package}`；非法字符自动换成 `_` |
-| `minLevel` | `DEBUG` | 低于它不写文件（与 logcat 的 `d` 对齐） |
-| `maxFileBytes` | 2MB | 单文件上限，超过滚动成 `xxx.log.1` |
-| `maxFiles` | 5 | 保留文件数（含当前），超出的最旧一个删掉 |
-| `flushIntervalMs` | 800ms | 批量刷盘间隔 |
-| `includeThreadName` | false | 每行是否带线程名 |
-
-运行时开关 / 改配置：
-
-```kotlin
-EasyLog.startFileLogging(LogFileConfig(File(filesDir, "logs"), minLevel = LogLevel.INFO))
-EasyLog.stopFileLogging()
-EasyLog.fileLogPath      // 当前文件名（绝对路径），没开就是 null
-EasyLog.fileLogError     // 最近一次写盘失败原因，正常为 null
-EasyLog.exportTo(File(dir, "dump.txt"))    // 把当前缓冲一次性导出（不动落盘任务）
-```
-
-面板里也能看到落盘路径，并有「导出当前 N 条到文件」按钮。
+内置两种：`Always`（默认）、`AfterFirstOpen`（面板打开过一次后才出现）。
+临时藏一下用 `EasyLogConsoleController.setBallVisible(false)`，优先级高于条件，
+传 `null` 恢复。完全不想要球就 `EasyLogConfig.trigger = Trigger.Hidden`，自己调
+`EasyLogConsoleController.show()` 打开。
 
 ---
 
@@ -213,91 +204,107 @@ EasyLog.exportTo(File(dir, "dump.txt"))    // 把当前缓冲一次性导出（�
 
 | 方法 | 说明 |
 |---|---|
-| `accept(level, tag, message, throwable?)` | 通用入口，正文里的 `[模块][分类]` 交给库解析 |
-| `record(level, trace, module, category, message, throwable?)` | 结构化入口，不做解析（正文本体带方括号时用这个） |
-| `step(trace, module, category, message)` | 关键节点，`LogLevel.STEP` |
-| `fail(trace, module, message, throwable?)` | 失败节点，`LogLevel.ERROR` |
-| `d/i/w/e(tag, message, throwable?)` | 单链路名简化版 |
-| `addSink { entry -> ... }` | 旁路消费：上报 / 桥接其他日志系统。返回的 `AutoCloseable` 一 `close()` 就解绑 |
+| `EasyLog.accept(level, tag, message, throwable?)` | 通用入口，`[模块][分类]` 从正文拆 |
+| `EasyLog.record(level, trace, module, category, message, throwable?)` | 结构化入口，不做解析 |
+| `EasyLog.step / fail / d / i / w / e` | 上面的语法糖 |
 
 ### 控制与读取
 
-| 成员 | 说明 |
+| 方法 | 说明 |
 |---|---|
-| `isAvailable` | 本包**是否允许**出现（`debugOnly` + `FLAG_DEBUGGABLE`）；release 包里恒为 `false` |
-| `canShow` | `isAvailable && isEnabled`，UI 真正判断用这个 |
-| `isEnabled` / `setEnabled(Boolean)` | 用户总开关，持久化；release 包里传 `true` 会被忽略 |
-| `appearance` / `updateAppearance(...)` / `resetAppearance()` | 运行时外观（透明度、配色），面板里的滑杆走这里 |
-| `EasyLogConsoleController.show() / hide() / toggle()` | 主动开合面板 |
-| `EasyLogConsoleController.setBallVisible(Boolean?)` | 临时显隐悬浮球，`null` 交还给条件判断 |
-| `entries()` / `entriesSince(id)` / `latestId()` / `errorCount()` / `clear()` | 缓冲读取 |
+| `install(context, config)` / `installFromBootstrap(context)` | 初始化（自动初始化会调后者） |
+| `startLogcatCapture()` / `stopLogcatCapture()` | 采集开关，`isCapturingLogcat` / `logcatError` 可查 |
+| `startFileLogging(config)` / `stopFileLogging()` / `fileLogPath` | 落盘 |
+| `exportTo(File)` | 一次性导出缓冲区 |
+| `entries()` / `entriesSince(id)` / `latestId()` / `errorCount()` / `size()` / `clear()` | 读缓冲 |
+| `addSink { }` / `addEnabledListener { }` / `addAppearanceListener { }` | 旁路订阅 |
+| `updateAppearance(...)` / `resetAppearance()` / `appearance` | 外观 |
+| `isAvailable` / `canShow` / `isInstalled` / `setEnabled(Boolean)` | 状态 |
 
 ### 配置（`EasyLogConfig`）
 
+全部有默认值。常用的几项：
+
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `debugOnly` | `true` | 只在可调试包出现。判定用 `FLAG_DEBUGGABLE`，不依赖宿主的 `BuildConfig` |
-| `enabled` | `true` | 用户可见总开关的默认值；`debugOnly` 不过时直接被忽略 |
-| `capacity` | `3000` | 缓冲条数（200~20000） |
-| `maxMessageChars` | `4000` | 单条正文/堆栈上限，防整段 base64 挤爆缓冲 |
-| `ballAlpha` | `0.5` | 悬浮球不透明度（0.15~1.0） |
-| `panelAlpha` | `0.82` | 面板不透明度（0.2~1.0） |
-| `scrimAlpha` | `0.30` | 面板外遮罩不透明度（0~0.8） |
-| `panelHeightFraction` | `0.62` | 面板高度占屏比（0.3~0.9） |
-| `showThreadName` | `false` | 每行是否显示线程名（BLE 排查九成看顺序，默认关） |
-| `trigger` | `FloatingBall` | `FloatingBall` 按条件显示球 / `Hidden` 只由宿主 `show()` 打开 |
-| `colors` | `ConsoleColors()` | 配色；内置 `ConsolePalette.DARK / TERMINAL / LIGHT`，也可自定义每个颜色 |
-| `ballVisibility` | `Always` | 悬浮球出现条件，见上文 |
-| `file` | `null` | 落盘配置，`null` = 不写任何文件 |
+| `debugOnly` | `true` | 只在可调试包出现（`FLAG_DEBUGGABLE`） |
+| `autoCaptureLogcat` | `true` | 自动采集本进程 logcat |
+| `logcatMinLevel` | `DEBUG` | 采信的最低级别 |
+| `logcatTags` | 空 | 只收这些 tag（空 = 不限） |
+| `logcatIgnoreTags` | 一批系统噪音 | 前缀匹配，`emptySet()` = 全量收 |
+| `autoAttachOverlay` | `true` | 自动挂到每个 Activity |
+| `capacity` | `3000` | 缓冲条数（200 ~ 20000） |
+| `panelAlpha` / `ballAlpha` / `scrimAlpha` | `0.82 / 0.55 / 0.30` | 三处不透明度默认值 |
+| `ballVisibility` / `trigger` | `Always` / `FloatingBall` | 出现条件 |
+| `colors` | 暗色 | `ConsolePalette.DARK / TERMINAL / LIGHT` 或自定义 `ConsoleColors` |
+| `file` | `null` | 落盘，`null` = 不写 |
 
 ---
 
 ## 复用其他项目
 
-- **同工程多模块**：直接 `implementation`，任意模块都能打点。
-- **另一个仓库**：`includeBuild`（方案 A），或复制 `library/` 目录 + 一行依赖。
-- **多个项目长期用**：`publishToMavenLocal` / 发内网仓库 / GitHub Packages，坐标
-  `io.github.wwwvolley:easylog-console:1.0.0`，改 `group` 与 `version` 只动
-  `library/build.gradle.kts` 顶部两个 `providers.gradleProperty` 的默认值（也可用 `-Peasylog.version=` 覆盖）。
+**方式 A：Maven 坐标（推荐）**
 
-库本身不依赖任何宿主代码，也没有 `ContentProvider` / `Initializer` 自动注册 —— **宿主清单一行都不用改**。
+```kotlin
+dependencies { debugImplementation("io.github.wwwvolley:easylog-console:1.0.0") }
+```
+
+发布到本地/私有仓库：
+
+```bash
+./gradlew :easylog-console:publishToMavenLocal   # 本机 ~/.m2
+./gradlew :easylog-console:publishReleasePublicationToLocalRepoRepository  # build/repo 目录
+```
+
+也可以把 `library/build.gradle.kts` 里 `repositories` 换成 GitHub Packages / 公司私服。
+
+**方式 B：复合构建（改库源码时用）**
+
+```kotlin
+// settings.gradle.kts
+includeBuild("../easyLogConsole")
+```
+
+依赖照写坐标 —— 那个工程的模块名就叫 `easylog-console`、group 是 `io.github.wwwvolley`，
+跟坐标一致，Gradle 会自动替换成本地源码，**不用写 `dependencySubstitution`**。
+
+**方式 C：拷源码**
+
+`library/src/main/java/io/github/wwwvolley/easylog/` 整个包拷进去即可，
+核心层不依赖 Compose（`ui` 包除外），模块名随意。
 
 ---
 
 ## 已知边界（都是故意这么设计的）
 
-- **不拦截 logcat**：宿主已经有自己的日志出口，库只提供 `accept` 入口，不做反射、不抢占 `Log`。
-- **不默认落盘**：要留存必须显式给目录。分享仍走剪贴板 + `ACTION_SEND` 文本
-  （不落临时文件，省掉 `FileProvider` 和 authority 冲突）。
-- **不持久化历史日志到内存之外**：杀进程即清空；要长期留存请开 `file` 或自己 `addSink`。
-- **面板不跟随宿主主题**：调试工具自带一套配色，换来「装进任何工程长相一致」；
-  需要跟随就换 `ConsolePalette` 或传自定义 `ConsoleColors`。
-- **`debugOnly` 不是安全边界**：它防的是「release 包里误带调试浮层」，
-  不是防逆向。真要彻底删掉，用 `debugImplementation` 依赖。
+- **只采本进程日志**：多进程 App 里，其它进程的日志不会出现在这个面板里（系统限制）。
+- **tag 上限 23 字符**：超长 tag 会被 logcat 截断，按 tag 精确筛选时注意。
+- **不用 logcat 时没有 `trace`**：`accept` 的 trace 就是 tag；想自定义链路名请用 `record`。
+- **面板打开状态不跨 Activity 保留**：换页会重建浮层，滚动位置重置（日志本身不丢）。
+- **`STEP` 只由 `★` 前缀或 `EasyLog.step()` 产生**：logcat 本身没有这个级别。
+- **个别 ROM 可能禁 `logcat`**：此时 `EasyLog.logcatError` 有值、面板为空，
+  改用 `EasyLog.accept` 即可。
 
 ---
 
 ## 示例工程
 
-`./gradlew :sample:installDebug`，界面里有：
+```bash
+./gradlew :sample:installDebug
+```
 
-- 走一遍配网（模拟 BLE 全链路，含 STEP / INFO / 异常）
-- 造一条异常（验证红点）
-- 走老格式 `[模块][分类]`（验证解析兼容）
-- 瞬间刷 300 条（验证重组开销）
-- 点我计数（验证浮层不挡业务点击）
-- 切换配色（暗色 → 终端绿 → 亮色）
-- 临时藏起悬浮球 3 秒（验证 `setBallVisible`）
-- 落盘路径（验证 `LogFileConfig`）
+`sample/MainActivity` 里**没有任何初始化代码**，只用原生 `Log.x` 打点 ——
+这就是「一行依赖、零行代码」的可执行证明。
+
+---
 
 ## 测试
 
 ```bash
-./gradlew :library:testDebugUnitTest
-# 日志解析、环形缓冲、文件名模板、落盘与滚动，共 23 个用例
+./gradlew :easylog-console:testDebugUnitTest
+# 日志解析、logcat 行解析、环形缓冲、文件名模板、落盘与滚动，共 30 个用例
 ```
 
 ## 许可证
 
-MIT，见 [LICENSE](LICENSE)。要换成 Apache-2.0 只改 `LICENSE` 与 `library/build.gradle.kts` 里 POM 的
-`licenses` 一段。
+MIT

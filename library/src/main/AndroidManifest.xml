@@ -1,3 +1,21 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 本库不声明任何权限、组件或初始化项：装上去就能用，宿主的清单一行都不用改。 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<!--
+  本库只声明一个空 Provider：靠它的 onCreate 时机完成「自动安装 + 采集 logcat + 挂浮层」，
+  这样宿主连 Application 都不用改。不申请任何权限，也不声明 Activity / Service。
+
+  宿主想关掉自动初始化（自己调 EasyLog.install 配参数时）：
+  <application>
+      <meta-data android:name="io.github.wwwvolley.easylog.AUTO_INIT" android:value="false" />
+  </application>
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application>
+        <provider
+            android:name="io.github.wwwvolley.easylog.EasyLogBootstrap"
+            android:authorities="${applicationId}.easylog-bootstrap"
+            android:exported="false"
+            android:initOrder="100" />
+    </application>
+
+</manifest>

@@ -31,6 +31,19 @@ import java.io.File
  *   当前页面、远程开关等条件自己决定，见 [BallVisibility]。
  * @property file 落盘配置。`null`（默认）= **不写任何文件**，
  *   宿主本来怎么存日志完全不受影响；需要时按 [LogFileConfig] 指定目录即可。
+ * @property autoCaptureLogcat 自动采集**本进程**的 logcat，喂进日志台。默认 `true`。
+ *   有了它宿主不用改任何日志出口 —— `Log.d/i/w/e` 照常写，Android Studio 照常看，
+ *   手机上同时也能看。想完全自己控制（只用 [EasyLog.accept] 手动投递）才置 `false`。
+ * @property logcatMinLevel 采信的最低级别。默认 [LogLevel.DEBUG]（丢掉 VERBOSE，
+ *   那一档几乎全是系统刷屏）；觉得还不够安静可以提到 [LogLevel.INFO]。
+ * @property logcatTags 只采信这些 tag（空 = 不限）。多个模块共用日志出口时，
+ *   传 `setOf("YBDL")` 之类就能把面板收窄到业务自己的日志。
+ * @property logcatIgnoreTags 一律丢弃的 tag（**按前缀匹配**，所以写 `ActivityManager`
+ *   会连 `ActivityManager: ...` 一起挡掉）。默认是一批每个 debug 包都在刷、
+ *   但和业务无关的系统噪音。想全量收就传 `emptySet()`。
+ * @property autoAttachOverlay 自动把浮层挂到每个 Activity 上（由内置的
+ *   ContentProvider 完成初始化）。默认 `true`；想自己在根布局里放
+ *   `EasyLogConsole()` 时置 `false`，别两头都挂。
  */
 data class EasyLogConfig(
     val debugOnly: Boolean = true,
@@ -46,6 +59,11 @@ data class EasyLogConfig(
     val colors: ConsoleColors = ConsoleColors(),
     val ballVisibility: BallVisibility = BallVisibility.Always,
     val file: LogFileConfig? = null,
+    val autoCaptureLogcat: Boolean = true,
+    val logcatMinLevel: LogLevel = LogLevel.DEBUG,
+    val logcatTags: Set<String> = emptySet(),
+    val logcatIgnoreTags: Set<String> = NOISE_TAGS,
+    val autoAttachOverlay: Boolean = true,
 ) {
 
     internal fun normalized(): EasyLogConfig = copy(
@@ -69,6 +87,83 @@ data class EasyLogConfig(
     enum class Trigger {
         FloatingBall,
         Hidden,
+    }
+
+    companion object {
+
+        /**
+         * 默认丢弃的 tag（**前缀匹配**）。
+         *
+         * 这些行每个 debug 包都有、且永远和业务无关，一秒能刷几十条 ——
+         * 不滤掉的话面板一打开全是 `Choreographer: Skipped N frames`、
+         * `VRI[MainActivity]: ViewPostIme pointer 0`，真正想看的配网日志被冲出屏幕。
+         *
+         * 挑的都是「足够长、不会被业务 tag 撞上」的词；别把 `Activity`、`View`
+         * 这种短词加进来，前缀匹配会误伤。
+         */
+        @JvmField
+        val NOISE_TAGS: Set<String> = setOf(
+            "Choreographer",
+            "OpenGLRenderer",
+            "ViewPostIme",
+            // Compose 1.9 起每一帧打一条 setRequestedFrameRate，不挡会淹掉一切
+            "View",
+            "VRI",
+            "libEGL",
+            "libGLESv2",
+            "EGL_emulation",
+            "chatty",
+            "Zygote",
+            "art",
+            "Compiler",
+            "HwUI",
+            "HWUI",
+            "ViewRootImpl",
+            "InsetsController",
+            "DecorView",
+            "ActivityTaskManager",
+            "ActivityManager",
+            "ActivityThread",
+            "PackageManager",
+            "ContextImpl",
+            "LoadedApk",
+            "ApplicationLoaders",
+            "Resources",
+            "BLASTBufferQueue",
+            "SurfaceView",
+            "gralloc",
+            "nativeloader",
+            "SoLoader",
+            "ziparchive",
+            "ProfileInstaller",
+            "ProfilerInstaller",
+            "GraphicsEnvironment",
+            "Compatibility",
+            "InputDispatcher",
+            "InputReader",
+            "InputMethodManager",
+            "SemWindowManager",
+            "ForceDarkHelper",
+            "WindowOnBackDispatcher",
+            "ClipboardService",
+            "libc",
+            "DisplayManager",
+            // 高通 GPU 驱动，一台机器上能刷几百条
+            "Adreno",
+            "ashmem",
+            "BufferQueueProducer",
+            "EGL",
+            "InsetsSourceConsumer",
+            "ImeTracker",
+            "InputTransport",
+            "hwuimtk",
+            "libprocessgroup",
+            // 三星 ROM 特有的一批，跑一个点击能刷一屏
+            "IDS_TAG",
+            "Desktop",
+            "SurfaceComposerClient",
+            "SurfaceFlinger",
+        )
     }
 }
 

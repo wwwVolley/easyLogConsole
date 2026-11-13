@@ -7,6 +7,14 @@ plugins {
     id("maven-publish")
 }
 
+// 发布坐标。group 必须在这里设（不是只在 publication 里），
+// 宿主 includeBuild 时靠 group:name 自动替换依赖，group 空着就替换不上。
+val libGroup: String = providers.gradleProperty("easylog.group").getOrElse("io.github.wwwvolley")
+val libVersion: String = providers.gradleProperty("easylog.version").getOrElse("1.0.0")
+
+group = libGroup
+version = libVersion
+
 android {
     namespace = "io.github.wwwvolley.easylog"
     compileSdk = 37
@@ -63,11 +71,9 @@ dependencies {
 
 // ── 发布配置 ───────────────────────────────────────────────────────
 // 用法：
-//   本地： ./gradlew :library:publishToMavenLocal
-//   到本地仓库目录：./gradlew :library:publishReleasePublicationToLocalRepoRepository
+//   本地： ./gradlew :easylog-console:publishToMavenLocal
+//   到本地仓库目录：./gradlew :easylog-console:publishReleasePublicationToLocalRepoRepository
 //   GitHub Packages：把 repositories 换成 maven { url = uri("https://maven.pkg.github.com/...") }
-val libGroup: String = providers.gradleProperty("easylog.group").getOrElse("io.github.wwwvolley")
-val libVersion: String = providers.gradleProperty("easylog.version").getOrElse("1.0.0")
 
 // 必须等 AGP 把变体注册完（`components["release"]` 才存在）再建 publication
 afterEvaluate {

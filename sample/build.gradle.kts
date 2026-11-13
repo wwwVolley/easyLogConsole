@@ -35,7 +35,8 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":library"))
+    // 宿主工程的写法也一样：implementation / debugImplementation 一行 + 模块名（或发布坐标）
+    implementation(project(":easylog-console"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.foundation)
     implementation(libs.androidx.compose.ui)

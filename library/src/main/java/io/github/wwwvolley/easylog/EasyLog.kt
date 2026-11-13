@@ -8,25 +8,35 @@ import java.util.concurrent.CopyOnWriteArrayList
 /**
  * 本库的唯一入口。
  *
- * ## 最小接入（3 行）
+ * ## 最小接入（0 行代码）
+ * ```kotlin
+ * debugImplementation("io.github.wwwvolley:easylog-console:1.0.0")
+ * ```
+ * 就这一行。库里的 ContentProvider 会在进程启动时自动完成：
+ * 安装 → 采集本进程 logcat → 把悬浮球挂到每个 Activity 上。
+ * 宿主**一行业务代码都不用改**，`Log.d/i/w/e` 与 Android Studio 的 Logcat 窗口照旧。
+ *
+ * ## 想要自定义（1 行）
  * ```kotlin
  * // Application.onCreate()
- * EasyLog.install(this)
- *
- * // 已有的日志出口后面挂一行（推荐，业务打点代码一行都不用改）
- * AppLog.sink = { level, tag, message, throwable -> EasyLog.accept(level, tag, message, throwable) }
+ * EasyLog.install(this, EasyLogConfig(logcatTags = setOf("YBDL"), file = LogFileConfig(...)))
  * ```
- * 之后 Compose 根布局里放一个 `EasyLogConsole()`，或者直接
- * `ComponentActivity.installEasyLogOverlay()`，悬浮球就出来了。
+ * 清单里再加一条关掉自动初始化的 meta-data（见 [EasyLogBootstrap.META_DATA]），
+ * 避免默认配置先跑一遍。
+ *
+ * ## 精确投递（可选）
+ * 不想靠 logcat、想自己控制每条日志的模块/分类时，直接调 [accept] / [record]；
+ * 已经有日志出口的工程也可以把出口旁的 sink 接到 [accept]，业务打点代码照样不用改。
  *
  * ## 设计上的取舍
- * - **不在库里拦截 logcat**：宿主本来就有自己的日志出口（`AppLog` 这种薄封装），
- *   库只提供 [accept] 这个「入口」，谁接谁负责。所以宿主的
- *   `Log.d/i/w/e`（Android Studio 的 Logcat 窗口）照常输出，两边互不干扰 ——
- *   这是接入本库**唯一不能省**的一条约束：转发是**旁路**，不是替换。
+ * - **转发是旁路，不是替换**：库从不调 `android.util.Log`，也从不拦截它。
+ *   宿主的 `Log.d/i/w/e`（Android Studio 的 Logcat 窗口）照常输出，
+ *   本库只是多读了一份自己的进程日志 —— 两边互不干扰。
  * - **不接管文件写入**：本库默认一个文件都不写。要落盘由宿主在
  *   [EasyLogConfig.file] 里指定目录（见 [LogFileConfig]），库只在自己的滚动文件里追加，
  *   不删、不截断、不锁宿主目录里别人的文件。
+ * - **release 包里不存在**：`debugOnly` + `debugImplementation` 双保险，
+ *   release 包连这个 AAR 都不会打包进去。
  * - **核心层不依赖 Compose**：`LogStore` / `LogEntry` / `LogParser` / `LogFileSink`
  *   都是纯 Kotlin/JVM，可以在 JVM 单测里直接跑；Compose 只出现在 `ui` 包里。
  * - **写端不等读端**：入队就返回，面板什么时候取由它自己按节流决定，
@@ -45,6 +55,20 @@ object EasyLog {
 
     @Volatile
     private var installed = false
+
+    /**
+     * 当前这次安装是不是内置 ContentProvider 用**默认配置**自动做的。
+     *
+     * 自动初始化发生在 `Application.onCreate` **之前**，宿主想要的配置却是写在
+     * `Application.onCreate` 里的。所以允许宿主在那之后**覆盖一次**：
+     * bootstrap 装的配置算「临时占位」，宿主显式 install 时以宿主为准，
+     * 之后再调 install 才回到原来的「首次调用者说了算」。
+     */
+    @Volatile
+    private var installedByBootstrap = false
+
+    @Volatile
+    private var capture: LogcatCapture? = null
 
     /** 本包是否可调试（`FLAG_DEBUGGABLE`）。release 签名包这里是 `false`。 */
     @Volatile
@@ -80,6 +104,10 @@ object EasyLog {
     val isAvailable: Boolean
         get() = installed && (!config.debugOnly || debuggable)
 
+    /** 是否已经初始化过（自动初始化也算）。 */
+    val isInstalled: Boolean
+        get() = installed
+
     /** UI 是否该画东西：允许出现 **且** 用户没关掉。 */
     val canShow: Boolean
         get() = isAvailable && enabled.value
@@ -105,23 +133,44 @@ object EasyLog {
         get() = fileSink?.lastError
 
     /**
-     * 初始化。幂等，且**首次调用者说了算**：宿主通常在 `Application.onCreate` 里配一次，
-     * 之后 Activity 侧再调（比如 [installEasyLogOverlay]）不会把配置改回默认值，
-     * 只会补上缺失的 Context。
+     * 初始化（幂等）。不调用也行 —— 内置的 [EasyLogBootstrap] 会用默认配置自动调。
+     *
+     * 只在需要**非默认配置**时才写这一行，通常放在 `Application.onCreate`：
+     * ```kotlin
+     * EasyLog.install(this, EasyLogConfig(logcatTags = setOf("YBDL")))
+     * ```
+     * 自动初始化已经跑过时，这里的配置会覆盖它（仅这一次）；
+     * 之后再调（比如 `installEasyLogOverlay()`）不会把配置改回默认值。
      */
     fun install(context: Context, config: EasyLogConfig = EasyLogConfig()) {
-        if (installed) {
-            if (prefs == null) prefs = ConsolePrefs(context)
-            return
-        }
         val app = context.applicationContext ?: context
+        if (installed) {
+            if (prefs == null) prefs = ConsolePrefs(app)
+            // 自动初始化装的默认配置允许被宿主的显式配置顶掉一次，其余情况保持幂等
+            if (!installedByBootstrap) return
+        }
+        applyInstall(app, config, bootstrap = false)
+    }
+
+    /** 内置 ContentProvider 专用：进程启动时用默认配置把库装起来，宿主零代码。 */
+    internal fun installFromBootstrap(context: Context) {
+        if (installed) return
+        applyInstall(context.applicationContext ?: context, EasyLogConfig(), bootstrap = true)
+    }
+
+    private fun applyInstall(app: Context, config: EasyLogConfig, bootstrap: Boolean) {
+        stopLogcatCapture()
+
         debuggable = (app.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
 
         val normalized = config.normalized()
+        // 缓冲区大小没变就别重建，否则自动初始化之后宿主再 install 会把这几毫秒的日志丢掉
+        val needNewStore = !installed || this.config.capacity != normalized.capacity
         this.config = normalized
-        store = LogStore(normalized.capacity)
-        prefs = ConsolePrefs(app)
+        if (needNewStore) store = LogStore(normalized.capacity)
+        if (prefs == null) prefs = ConsolePrefs(app)
         installed = true
+        installedByBootstrap = bootstrap
 
         // 先 assign 配置再判 isAvailable：release 包里这里直接落成 false，
         // 用户之前手动开过也不会让它在 release 包里冒出来
@@ -137,7 +186,40 @@ object EasyLog {
         ).normalized()
 
         normalized.file?.let { startFileLogging(it) }
+        if (normalized.autoCaptureLogcat) startLogcatCapture()
     }
+
+    // ── logcat 采集 ────────────────────────────────────────────────
+
+    /**
+     * 开始采集本进程的 logcat（[EasyLogConfig.autoCaptureLogcat] 为真时
+     * [install] 已经自动调过，一般不用手动调）。
+     */
+    fun startLogcatCapture() {
+        if (!isAvailable) return
+        if (capture?.isRunning == true) return
+        val cfg = config
+        capture = LogcatCapture(
+            minLevel = cfg.logcatMinLevel,
+            tags = cfg.logcatTags,
+            ignoreTags = cfg.logcatIgnoreTags,
+            packageTag = prefs?.packageName,
+            onLine = { level, tag, message -> accept(level, tag, message) },
+        ).also { it.start() }
+    }
+
+    /** 停掉采集。面板里想看「从现在开始」的干净日志时可以调。 */
+    fun stopLogcatCapture() {
+        capture?.stop()
+        capture = null
+    }
+
+    val isCapturingLogcat: Boolean
+        get() = capture?.isRunning == true
+
+    /** 采集失败的原因（个别 ROM 禁了 `logcat`），正常为 `null`。 */
+    val logcatError: String?
+        get() = capture?.lastError
 
     fun setEnabled(value: Boolean) {
         // release 包里想把开关打开？直接忽略。省得改天有人从别处调进了 release

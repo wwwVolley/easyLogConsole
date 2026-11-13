@@ -1,6 +1,7 @@
 package io.github.wwwvolley.easylog.sample
 
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -9,7 +10,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -32,59 +32,37 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import io.github.wwwvolley.easylog.BallVisibility
 import io.github.wwwvolley.easylog.ConsolePalette
 import io.github.wwwvolley.easylog.EasyLog
-import io.github.wwwvolley.easylog.EasyLogConfig
 import io.github.wwwvolley.easylog.EasyLogConsoleController
 import io.github.wwwvolley.easylog.LogFileConfig
 import io.github.wwwvolley.easylog.LogLevel
-import io.github.wwwvolley.easylog.installEasyLogOverlay
 import java.io.File
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * 示例工程：模拟一条完整的蓝牙配网链路，用来验证日志台。
+ * 示例工程 —— 演示**零代码接入**。
  *
- * 用 `installEasyLogOverlay()` 挂载（而不是在根布局里放 `EasyLogConsole()`），
- * 因为这条路径更「外来」——它要往 decorView 上塞一个 ComposeView，
- * 顺便也验证了「浮层空白区不挡业务点击」。
+ * 注意这个类里没有任何 `EasyLog.install` / `installEasyLogOverlay`：
+ * 库自带一个 ContentProvider，进程启动时就把库装好、把采集开起来、把浮层挂上去了。
+ * 这里只写业务代码，日志用 Android 原生的 `Log.x` 打 —— 这正是想证明的事：
+ *
+ * > 加了依赖之后，老的 `Log.d/i/w/e` 一行都不用改，手机上就能看到。
+ *
+ * 正文以 `★` 开头的那行会显示成「关键节点」（绿色色条），
+ * 宿主用 `Log.i(TAG, "★ 开始连接")` 就能拿到，不必专门调库的 API。
  */
 class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        EasyLog.install(
-            this,
-            EasyLogConfig(
-                // 默认就是 true：release 签名包里日志台一行都不画。
-                // 这里显式写出来，是为了让示例本身就是「正确用法」的样板
-                debugOnly = true,
-                capacity = 2000,
-                panelHeightFraction = 0.66f,
-                showThreadName = false,
-                // 悬浮球半透明，不挡页面；面板 80%、遮罩 30%，进面板还能「外观」页再调
-                ballAlpha = 0.5f,
-                panelAlpha = 0.8f,
-                scrimAlpha = 0.25f,
-                // 落盘：目录由宿主指定，库只 append 自己的文件。
-                // 模拟器/真机上 adb pull 这个路径就能拿到日志
-                file = LogFileConfig(
-                    directory = File(getExternalFilesDir(null), "easylog"),
-                    minLevel = LogLevel.DEBUG,
-                ),
-                // 自定义触发：这里演示「只在打过标记之后才出现」。
-                // 宿主可以换成「登录后才出现」「只在配网页出现」之类的任意条件
-                ballVisibility = BallVisibility { true },
-            ),
-        )
+        Log.i(TAG, "★ [示例][启动] MainActivity 创建，日志台已自动就绪")
         setContent { SampleScreen() }
-        // 挂载浮层。放在 setContent 之后，保证它在内容之上
-        installEasyLogOverlay()
     }
 }
+
+private const val TAG = "YBDL"
 
 @Composable
 private fun SampleScreen() {
@@ -105,29 +83,22 @@ private fun SampleScreen() {
             style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Medium, color = Color(0xFF1A1C1F)),
         )
         BasicText(
-            text = "点「走一遍配网」造日志，然后点右下角的 LOG 球打开日志台。\n" +
+            text = "没有一行初始化代码 —— 加依赖就够了。\n" +
+                "点「走一遍配网」用原生 Log 打日志，然后点 LOG 球打开日志台。\n" +
                 "「点我计数」用来验证浮层不挡业务点击。",
             style = TextStyle(fontSize = 13.sp, lineHeight = 20.sp, color = Color(0xFF5C6470)),
         )
 
-        Action("走一遍配网（模拟 BLE 全链路）") { scope.launch { simulateProvision() } }
+        Action("走一遍配网（原生 Log 打点）") { scope.launch { simulateProvision() } }
         Action("造一条异常（红点 +1）") {
-            EasyLog.fail("PROVISION", "云端", "bind-status 轮询超时 15s（模拟）")
+            Log.e(TAG, "[云端][异常] bind-status 轮询超时 15s（模拟）")
         }
-        Action("走老格式 [模块][分类]（兼容已有日志出口）") {
-            EasyLog.w("PROVISION", "[下发][异常] GATT 133，重试 1/2（模拟）")
-            EasyLog.i("PROVISION", "[读SN][数据] SN=SIM-20261113-0001（模拟）")
+        Action("关键节点 / 普通信息各一条") {
+            Log.i(TAG, "★ [下发][流程] 写入 WiFi 凭据 ssid=Home-2.4G")
+            Log.d(TAG, "[下发][数据] 设备回 0x00")
         }
         Action("瞬间刷 300 条（压一压重组）") {
-            repeat(300) { index ->
-                EasyLog.record(
-                    level = LogLevel.DEBUG,
-                    trace = "STRESS",
-                    module = "压测",
-                    category = "流程",
-                    message = "第 $index 条 · 用来观察面板是否掉帧",
-                )
-            }
+            repeat(300) { index -> Log.d(TAG, "[压测][流程] 第 $index 条 · 观察面板是否掉帧") }
         }
         Action("点我计数：$tapCount") { tapCount++ }
         Action("切换配色（暗色 → 终端绿 → 亮色）") {
@@ -142,8 +113,16 @@ private fun SampleScreen() {
                 EasyLogConsoleController.setBallVisible(null)
             }
         }
-        Action("落盘路径") {
-            Toast.makeText(context, EasyLog.fileLogPath ?: "未开启落盘", Toast.LENGTH_LONG).show()
+        Action("开始落盘到应用目录") {
+            // 落盘默认关闭（库一个字节都不写）。要存就自己给一个目录，一行搞定
+            EasyLog.startFileLogging(
+                LogFileConfig(
+                    directory = File(context.getExternalFilesDir(null), "easylog"),
+                    minLevel = LogLevel.DEBUG,
+                ),
+            )
+            Log.i(TAG, "★ [落盘][流程] 已开启，路径=${EasyLog.fileLogPath}")
+            Toast.makeText(context, EasyLog.fileLogPath ?: "开启失败", Toast.LENGTH_LONG).show()
         }
     }
 }
@@ -170,48 +149,45 @@ private fun Action(text: String, onClick: () -> Unit) {
 /**
  * 模拟配网：扫描 → 连接 → GATT → 读 SN → 保活 → 下发 WiFi → 云端激活。
  *
- * 打点方式故意混用两种，验证两条入口都能进面板：
- * - `EasyLog.step/record/fail`：结构化，模块与分类直接给；
- * - `EasyLog.w/i`：老格式 `[模块][分类] 正文`，由库自己解析。
+ * **全程只用 `android.util.Log`**：这些行会照常出现在 Android Studio 的 Logcat 里，
+ * 同时被本库旁路采集到悬浮日志台 —— 这就是「不影响 Studio 控制台」的实证。
  */
 private suspend fun simulateProvision() {
-    val trace = "PROVISION"
-
-    EasyLog.step(trace, "权限", "流程", "蓝牙 / 定位 / 通知 均已授权")
+    Log.i(TAG, "★ [权限][流程] 蓝牙 / 定位 / 通知 均已授权")
     delay(180)
 
-    EasyLog.step(trace, "扫描", "流程", "开始扫描 6s，过滤 FFF0 广播")
+    Log.i(TAG, "★ [扫描][流程] 开始扫描 6s，过滤 FFF0 广播")
     delay(400)
-    EasyLog.record(LogLevel.DEBUG, trace, "扫描", "底层", "onScanResult rssi=-52 name=小伴019 mac=AC:12:XX:XX:9F:21")
+    Log.d(TAG, "[扫描][底层] onScanResult rssi=-52 name=小伴019 mac=AC:12:XX:XX:9F:21")
     delay(260)
-    EasyLog.record(LogLevel.INFO, trace, "扫描", "流程", "命中目标设备，停止扫描")
+    Log.i(TAG, "[扫描][流程] 命中目标设备，停止扫描")
 
-    EasyLog.step(trace, "连接", "流程", "connectGatt(autoConnect=false)")
+    Log.i(TAG, "★ [连接][流程] connectGatt(autoConnect=false)")
     delay(900)
-    EasyLog.record(LogLevel.INFO, trace, "连接", "状态", "onConnectionStateChange status=0 newState=CONNECTED")
+    Log.i(TAG, "[连接][状态] onConnectionStateChange status=0 newState=CONNECTED")
     delay(200)
-    EasyLog.record(LogLevel.DEBUG, trace, "连接", "底层", "discoverServices() 发起")
+    Log.d(TAG, "[连接][底层] discoverServices() 发起")
     delay(420)
-    EasyLog.record(LogLevel.INFO, trace, "连接", "流程", "服务发现完成，FFF0/FFF1/FFF2 就绪 · MTU=247")
+    Log.i(TAG, "[连接][流程] 服务发现完成，FFF0/FFF1/FFF2 就绪 · MTU=247")
 
-    EasyLog.step(trace, "读SN", "流程", "读 FFF2")
+    Log.i(TAG, "★ [读SN][流程] 读 FFF2")
     delay(300)
-    EasyLog.record(LogLevel.INFO, trace, "读SN", "数据", "SN=YB019-20261113001 固件=1.4.2")
+    Log.i(TAG, "[读SN][数据] SN=YB019-20261113001 固件=1.4.2")
 
-    EasyLog.step(trace, "保活", "流程", "进入 30s 保活（设备无交互会主动断开）")
+    Log.i(TAG, "★ [保活][流程] 进入 30s 保活（设备无交互会主动断开）")
     delay(500)
-    EasyLog.record(LogLevel.DEBUG, trace, "保活", "流程", "心跳 ok #1")
+    Log.d(TAG, "[保活][流程] 心跳 ok #1")
 
-    EasyLog.step(trace, "下发", "流程", "写入 WiFi 凭据 ssid=Home-2.4G pwd=****(11)")
+    Log.i(TAG, "★ [下发][流程] 写入 WiFi 凭据 ssid=Home-2.4G pwd=****(11)")
     delay(600)
-    EasyLog.record(LogLevel.INFO, trace, "下发", "状态", "设备回 0x00 已接收，开始连路由器")
+    Log.i(TAG, "[下发][状态] 设备回 0x00 已接收，开始连路由器")
     delay(1200)
-    EasyLog.record(LogLevel.INFO, trace, "下发", "状态", "设备已联网 ip=192.168.1.42 rssi=-47")
+    Log.i(TAG, "[下发][状态] 设备已联网 ip=192.168.1.42 rssi=-47")
 
-    EasyLog.step(trace, "云端", "网络", "POST /robot/bind")
+    Log.i(TAG, "★ [云端][网络] POST /robot/bind")
     delay(700)
-    EasyLog.record(LogLevel.INFO, trace, "云端", "网络", "HTTP 200 · code=0 · robotId=8801")
-    EasyLog.step(trace, "云端", "网络", "轮询 GET /robot/bind-status ×3")
+    Log.i(TAG, "[云端][网络] HTTP 200 · code=0 · robotId=8801")
+    Log.i(TAG, "★ [云端][网络] 轮询 GET /robot/bind-status ×3")
     delay(500)
-    EasyLog.step(trace, "云端", "流程", "激活成功，可以退出配网页了")
+    Log.i(TAG, "★ [云端][流程] 激活成功，可以退出配网页了")
 }
