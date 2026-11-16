@@ -345,6 +345,29 @@ object EasyLog {
     val isFileLogging: Boolean
         get() = fileSink != null
 
+    /**
+     * **立刻**把队列里的日志写完并 flush，不等 [LogFileConfig.flushIntervalMs]。
+     *
+     * 平时不要调：落盘本来就是「打点入队、后台线程批量写」，多一次同步 flush
+     * 就是多一次磁盘 IO 卡在调用线程上。
+     *
+     * 必须同步的场景只有一个 —— **进程马上就要死**：
+     * ```kotlin
+     * Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+     *     EasyLog.record(LogLevel.ERROR, "CRASH", "崩溃", "", traceText, error)
+     *     EasyLog.flush()          // 少了这一行，崩溃日志会跟着进程一起消失
+     *     previous?.uncaughtException(thread, error)
+     * }
+     * ```
+     * 队列里已经入队的条目在这一行之后**一定**在磁盘上；没写进去的只有
+     * 磁盘满、目录不可写这类情况（原因在 [fileLogError] 里）。
+     *
+     * 与后台定时线程并发调用是安全的（内部串行化），不用自己加锁。
+     */
+    fun flush() {
+        fileSink?.flushNow()
+    }
+
     /** 把当前缓冲区导出成一个文本文件（不动落盘任务），返回写好的文件；失败返回 `null`。 */
     fun exportTo(target: File): File? = runCatching {
         target.parentFile?.mkdirs()

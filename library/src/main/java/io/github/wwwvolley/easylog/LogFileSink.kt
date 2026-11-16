@@ -86,7 +86,12 @@ internal class LogFileSink(
         if (!queue.offer(format(entry))) droppedCount++
     }
 
-    /** 立即把队列写完并 flush。宿主在退出前想保证落全时调它。 */
+    /**
+     * 立即把队列写完并 flush。宿主在退出前想保证落全时调它。
+     *
+     * 典型用途是崩溃兜底：`UncaughtExceptionHandler` 里记完日志调一次，
+     * 否则队列里那几条会跟着进程一起消失（见 [EasyLog.flush]）。
+     */
     fun flushNow() {
         runCatching { flushQueue() }
             .onFailure { lastError = it.message ?: it::class.java.simpleName }
@@ -120,6 +125,15 @@ internal class LogFileSink(
         entry.throwable?.let { append('\n').append(it) }
     }
 
+    /**
+     * 把队列里的内容一次性搬到文件并 flush。
+     *
+     * `@Synchronized` 不是可选项：定时线程每 [LogFileConfig.flushIntervalMs] 调一次，
+     * 崩溃兜底会从**崩溃线程**再调一次（[flushNow]），两个线程同时往一个
+     * [BufferedWriter] 和同一个队列上动手，轻则行与行交错、重则把文件写坏。
+     * 锁的粒度就是「搬一批」这个动作，持锁期间最多几百 KB 的写，可以接受。
+     */
+    @Synchronized
     private fun flushQueue() {
         if (queue.isEmpty() && writer == null) return
 

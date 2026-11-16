@@ -136,4 +136,28 @@ class LogFileSinkTest {
         val file = File(dir, "easylog.log")
         assertTrue("应自动建目录并落文件：${file.absolutePath}", file.exists())
     }
+
+    /**
+     * 崩溃兜底会从**崩溃线程**调 `flushNow()`，而此时后台定时线程可能正在搬队列。
+     * 两边共用同一个 [java.io.BufferedWriter] 和一个队列，没串行化就会写坏文件。
+     *
+     * 断言两件事：一条都不少、顺序不乱（行内容完整，没有交错出来的残行）。
+     */
+    @Test
+    fun `多线程同时 flushNow 不丢日志也不写乱顺序`() {
+        val dir = temp.newFolder("concurrent")
+        val count = 60
+        sink(dir).use { log ->
+            repeat(count) { log.accept(entry(message = "c-$it")) }
+            val threads = (1..4).map { Thread { log.flushNow() } }
+            threads.forEach { it.start() }
+            threads.forEach { it.join() }
+        }
+
+        val lines = File(dir, "easylog.log").readLines().filter { it.isNotBlank() }
+        assertTrue("行数不对：${lines.size}", lines.size == count)
+        repeat(count) { index ->
+            assertTrue("第 $index 行被写坏：${lines[index]}", lines[index].endsWith("c-$index"))
+        }
+    }
 }
