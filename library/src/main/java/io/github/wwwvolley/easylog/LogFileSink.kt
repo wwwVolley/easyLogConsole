@@ -21,9 +21,16 @@ import java.util.concurrent.TimeUnit
  * 反过来（丢旧的、留新的）会让文件里出现时间空洞却看不出来，更糟。
  * 丢弃本身会计入 [droppedCount]，面板里能看见。
  *
- * ## 滚动
- * 当前文件超过 [LogFileConfig.maxFileBytes] 就改名为 `xxx.log.1`，旧的依次后移，
- * 超 [LogFileConfig.maxFiles] 的最旧一个删掉。**只动自己滚出来的文件**，
+ * ## 滚动（两个维度，谁先触发算谁）
+ * - **按体积**：当前文件超过 [LogFileConfig.maxFileBytes] 就改名为 `xxx.log.1`，
+ *   旧的依次后移，超 [LogFileConfig.maxFiles] 的最旧一个删掉；
+ * - **按时间**：配了 [LogFileConfig.maxAgeHours] 时，`lastModified()` 早于
+ *   `now - maxAgeHours` 的文件也会被删掉。
+ *
+ * 两者缺一不可：文件数管「总量封顶」，但日志稀疏时（一天几百 KB）
+ * 永远滚不到上限，只有时间维度才能做到「真的只留最近一天」。
+ *
+ * 清理只动按 [LogFileConfig.fileNamePattern] 认得出的文件（见 [LogFileRetention]），
  * 目录里别人的文件一律不碰。
  */
 internal class LogFileSink(
@@ -44,6 +51,10 @@ internal class LogFileSink(
 
     @Volatile
     private var currentFile: File? = null
+
+    /** 上次做过期清理的时刻。0 表示还没清过，首轮落盘就会清一次。 */
+    @Volatile
+    private var lastPruneAtMs = 0L
 
     /** 最近一次写盘失败的原因，面板里直接显示给人看。 */
     @Volatile
@@ -136,6 +147,32 @@ internal class LogFileSink(
 
         val size = currentFile?.length() ?: 0L
         if (size >= config.maxFileBytes) roll()
+
+        pruneExpiredIfDue()
+    }
+
+    /**
+     * 按 [LogFileConfig.maxAgeHours] 删过期文件。
+     *
+     * 挂在落盘周期里做，不单独起线程：一是不值得为「一天清一次」再养一个线程，
+     * 二是这个时机天然「目录刚被确认可写」，失败也只是少删几个文件，不影响写日志。
+     * 用 [PRUNE_INTERVAL_MS] 节流，避免每 800ms 扫一遍目录。
+     */
+    private fun pruneExpiredIfDue() {
+        val hours = config.maxAgeHours ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastPruneAtMs < PRUNE_INTERVAL_MS) return
+        lastPruneAtMs = now
+
+        val cutoff = now - hours * 3_600_000L
+        val currentName = currentFile?.name
+        config.directory.listFiles()?.forEach { file ->
+            // 正在写的那个永远不删：写句柄还开着，删了文件会变成孤儿，
+            // 后续写入落到已 unlink 的 inode 上，看起来就是「日志突然不更新了」
+            if (!file.isFile || file.name == currentName) return@forEach
+            if (!LogFileRetention.isOwnFile(file.name, config.fileNamePattern)) return@forEach
+            if (file.lastModified() < cutoff) runCatching { file.delete() }
+        }
     }
 
     private fun ensureWriter(): BufferedWriter? {
@@ -177,5 +214,8 @@ internal class LogFileSink(
     private companion object {
         const val MAX_QUEUE = 20_000
         const val MAX_BATCH_CHARS = 256 * 1024
+
+        /** 过期清理的节流间隔。清理要扫目录，只有 800ms 一次的落盘节奏才需要节流。 */
+        const val PRUNE_INTERVAL_MS = 5 * 60_000L
     }
 }

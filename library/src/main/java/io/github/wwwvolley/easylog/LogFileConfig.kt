@@ -26,6 +26,10 @@ import java.io.File
  * @property minLevel 低于这个级别的不写文件（默认 DEBUG，与 logcat 的 `d` 对齐）。
  * @property maxFileBytes 单文件字节上限，超过就滚动（默认 2MB）。
  * @property maxFiles 保留的文件数（含当前文件，默认 5）。超出的最旧文件会被删。
+ * @property maxAgeHours 保留时长（小时），`null`（默认）= 不按时间清。
+ *   超过这个时长的文件会被删掉，**与 [maxFiles] 同时生效**，谁先触发算谁。
+ *   两个维度解决的是不同问题：[maxFiles] 管「体积封顶」，这个管「时间范围」——
+ *   日志很稀疏时（一天几百 KB）靠文件数永远删不到，时间维度才能真的只留最近一天。
  * @property flushIntervalMs 批量落盘的间隔（100 ~ 10000ms，默认 800ms）。
  * @property includeThreadName 每行是否带线程名。
  */
@@ -35,6 +39,7 @@ data class LogFileConfig(
     val minLevel: LogLevel = LogLevel.DEBUG,
     val maxFileBytes: Long = 2L * 1024 * 1024,
     val maxFiles: Int = 5,
+    val maxAgeHours: Int? = null,
     val flushIntervalMs: Long = 800L,
     val includeThreadName: Boolean = false,
 ) {
@@ -43,6 +48,8 @@ data class LogFileConfig(
         fileNamePattern = fileNamePattern.ifBlank { "easylog_{date}.log" },
         maxFileBytes = maxFileBytes.coerceIn(64L * 1024, 64L * 1024 * 1024),
         maxFiles = maxFiles.coerceIn(1, 50),
+        // 上限 30 天：再长就不该靠滚动文件了，该上服务端
+        maxAgeHours = maxAgeHours?.coerceIn(1, 24 * 30),
         flushIntervalMs = flushIntervalMs.coerceIn(100L, 10_000L),
     )
 }
